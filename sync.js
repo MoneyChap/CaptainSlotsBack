@@ -3,6 +3,7 @@ import { fetchGamesPage, buildEmbedUrl } from "./slotslaunch.js";
 import { CATEGORY_DEFS } from "./categories.js";
 
 const PER_PAGE = 150;
+const FULL_SYNC = String(process.env.FULL_SYNC || "").toLowerCase() === "true";
 
 function toDateStringYYYYMMDD(d) {
     const yyyy = d.getUTCFullYear();
@@ -24,7 +25,11 @@ function normalizeGame(g) {
     const rtp = typeof g.rtp === "number" ? g.rtp : g.rtp ? Number(g.rtp) : null;
     const updatedAt = g.updated_at || null;
     const createdAt = g.created_at || null;
-    const published = g.published ?? true;
+    const publishedRaw = g.published;
+    const published =
+        publishedRaw === true ||
+        publishedRaw === 1 ||
+        publishedRaw === "1";
 
     // SlotsLaunch provides iframe URL in g.url (typically https://slotslaunch.com/iframe/{id})
     const apiUrl = g.url || "";
@@ -39,6 +44,7 @@ function normalizeGame(g) {
         updatedAt,
         createdAt,
         published,
+        enabled: published,
         apiUrl,
         embedUrl,
     };
@@ -54,7 +60,6 @@ async function upsertGames(games) {
             docRef,
             {
                 ...g,
-                enabled: true,
                 syncedAt: new Date().toISOString(),
             },
             { merge: true }
@@ -180,7 +185,7 @@ export async function runSync() {
 
     // If no lastDate, do full sync; else incremental by updated_at date.
     // Use yesterday if lastDate missing (some APIs prefer date filter only).
-    const updatedAt = lastDate || null;
+    const updatedAt = FULL_SYNC ? null : (lastDate || null);
 
     let page = 1;
     let totalFetched = 0;
@@ -194,10 +199,15 @@ export async function runSync() {
         if (!rawGames.length) break;
 
         const normalized = rawGames.map(normalizeGame);
-        await upsertGames(normalized);
 
-        totalFetched += normalized.length;
-        lastSeenUpdatedAt = normalized[normalized.length - 1]?.updatedAt || lastSeenUpdatedAt;
+        // optional but recommended: do not store unpublished at all
+        const publishedOnly = normalized.filter((g) => g.published === true);
+
+        await upsertGames(publishedOnly);
+
+        totalFetched += publishedOnly.length;
+        lastSeenUpdatedAt =
+            publishedOnly[publishedOnly.length - 1]?.updatedAt || lastSeenUpdatedAt;
 
         // stop if we fetched fewer than per page
         if (rawGames.length < PER_PAGE) break;

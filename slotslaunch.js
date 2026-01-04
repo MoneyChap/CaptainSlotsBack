@@ -16,7 +16,7 @@ export async function fetchGamesPage({ page, perPage, updatedAt }) {
     url.searchParams.set("token", token);
     url.searchParams.set("page", String(page));
     url.searchParams.set("per_page", String(perPage));
-    url.searchParams.set("published", "true");
+    url.searchParams.set("published", 1);
     url.searchParams.set("order_by", "updated_at");
     url.searchParams.set("order", "asc");
 
