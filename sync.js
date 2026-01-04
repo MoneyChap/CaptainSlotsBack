@@ -210,6 +210,7 @@ export async function runSync() {
         const normalized = rawGames.map(normalizeGame);
         const publishedOnly = normalized.filter((g) => g.published === true);
         await upsertGames(publishedOnly);
+        break;
 
         totalFetched += publishedOnly.length;
 
