@@ -24,67 +24,130 @@ app.get("/health", (req, res) => {
     res.json({ ok: true });
 });
 
+// app.get("/api/home", async (req, res) => {
+//     try {
+//         const firestore = db();
+//         const result = [];
+
+//         for (const c of CATEGORY_DEFS) {
+//             // Read category doc to find which run is active
+//             const catSnap = await firestore.collection("categories").doc(c.id).get();
+//             const activeRunId = catSnap.exists ? catSnap.data()?.activeRunId : null;
+
+//             if (!activeRunId) {
+//                 result.push({ id: c.id, title: c.title, icon: c.icon, games: [] });
+//                 continue;
+//             }
+
+//             const itemsSnap = await firestore
+//                 .collection("categories")
+//                 .doc(c.id)
+//                 .collection("runs")
+//                 .doc(String(activeRunId))
+//                 .collection("items")
+//                 .orderBy("rank", "asc")
+//                 .limit(50)
+//                 .get();
+
+//             const gameIds = itemsSnap.docs.map((d) => d.id);
+
+//             if (gameIds.length === 0) {
+//                 result.push({ id: c.id, title: c.title, icon: c.icon, games: [] });
+//                 continue;
+//             }
+
+//             // Batch fetch games (max 50 here, safe)
+//             const gamesRefs = gameIds.map((id) => firestore.collection("games").doc(id));
+//             const gamesSnaps = await firestore.getAll(...gamesRefs);
+
+//             const games = gamesSnaps
+//                 .filter((s) => s.exists)
+//                 .map((s) => s.data())
+//                 .map((g) => ({
+//                     id: g.id,
+//                     name: g.name,
+//                     provider: g.provider,
+//                     thumb: g.thumb,
+//                     demoUrl: g.embedUrl,
+//                     rtp: g.rtp ?? null,
+//                 }));
+
+//             // keep the order according to item ranks
+//             const byId = new Map(games.map((g) => [String(g.id), g]));
+//             const ordered = gameIds.map((id) => byId.get(String(id))).filter(Boolean);
+
+//             result.push({ id: c.id, title: c.title, icon: c.icon, games: ordered });
+//         }
+
+//         res.json(result);
+//     } catch (e) {
+//         res.status(500).json({ error: String(e.message || e) });
+//     }
+// });
+
 app.get("/api/home", async (req, res) => {
     try {
         const firestore = db();
-        const result = [];
 
-        for (const c of CATEGORY_DEFS) {
-            // Read category doc to find which run is active
-            const catSnap = await firestore.collection("categories").doc(c.id).get();
-            const activeRunId = catSnap.exists ? catSnap.data()?.activeRunId : null;
+        // helper to map stored game doc to frontend shape
+        const toClientGame = (g) => ({
+            id: g.id,
+            name: g.name,
+            provider: g.provider,
+            thumb: g.thumb,
+            demoUrl: g.embedUrl,
+            rtp: g.rtp ?? null,
+        });
 
-            if (!activeRunId) {
-                result.push({ id: c.id, title: c.title, icon: c.icon, games: [] });
-                continue;
-            }
+        // best: newest updatedAt first
+        const bestSnap = await firestore
+            .collection("games")
+            .where("enabled", "==", true)
+            .orderBy("updatedAt", "desc")
+            .limit(50)
+            .get();
 
-            const itemsSnap = await firestore
-                .collection("categories")
-                .doc(c.id)
-                .collection("runs")
-                .doc(String(activeRunId))
-                .collection("items")
-                .orderBy("rank", "asc")
+        const bestGames = bestSnap.docs.map((d) => toClientGame(d.data()));
+
+        // new: newest createdAt first
+        const newSnap = await firestore
+            .collection("games")
+            .where("enabled", "==", true)
+            .orderBy("createdAt", "desc")
+            .limit(50)
+            .get();
+
+        const newGames = newSnap.docs.map((d) => toClientGame(d.data()));
+
+        // rtp97: try query, fallback to in-memory if you lack an index or rtp types are inconsistent
+        let rtp97Games = [];
+        try {
+            const rtpSnap = await firestore
+                .collection("games")
+                .where("enabled", "==", true)
+                .where("rtp", ">=", 97)
+                .orderBy("rtp", "desc")
                 .limit(50)
                 .get();
 
-            const gameIds = itemsSnap.docs.map((d) => d.id);
-
-            if (gameIds.length === 0) {
-                result.push({ id: c.id, title: c.title, icon: c.icon, games: [] });
-                continue;
-            }
-
-            // Batch fetch games (max 50 here, safe)
-            const gamesRefs = gameIds.map((id) => firestore.collection("games").doc(id));
-            const gamesSnaps = await firestore.getAll(...gamesRefs);
-
-            const games = gamesSnaps
-                .filter((s) => s.exists)
-                .map((s) => s.data())
-                .map((g) => ({
-                    id: g.id,
-                    name: g.name,
-                    provider: g.provider,
-                    thumb: g.thumb,
-                    demoUrl: g.embedUrl,
-                    rtp: g.rtp ?? null,
-                }));
-
-            // keep the order according to item ranks
-            const byId = new Map(games.map((g) => [String(g.id), g]));
-            const ordered = gameIds.map((id) => byId.get(String(id))).filter(Boolean);
-
-            result.push({ id: c.id, title: c.title, icon: c.icon, games: ordered });
+            rtp97Games = rtpSnap.docs.map((d) => toClientGame(d.data()));
+        } catch (e) {
+            // fallback: derive from "best" pool
+            rtp97Games = bestGames.filter((g) => typeof g.rtp === "number" && g.rtp >= 97).slice(0, 50);
         }
+
+        const result = [
+            { id: "best", title: "Best games", icon: "⭐", games: bestGames },
+            { id: "rtp97", title: "RTP 97%", icon: "🎯", games: rtp97Games },
+            { id: "exclusive", title: "Exclusive games", icon: "💎", games: [] },
+            { id: "new", title: "New games", icon: "🆕", games: newGames },
+        ];
 
         res.json(result);
     } catch (e) {
         res.status(500).json({ error: String(e.message || e) });
     }
 });
-
 
 app.get("/api/games/:id", async (req, res) => {
     try {

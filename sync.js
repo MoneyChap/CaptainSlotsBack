@@ -245,7 +245,11 @@ export async function runSync() {
         if (page > 2000) break;
     }
 
-    await rebuildCategoriesIndex({ limitPerCategory: 80 });
+    const REBUILD_CATEGORIES = String(process.env.REBUILD_CATEGORIES || "false").toLowerCase() === "true";
+    if (REBUILD_CATEGORIES) {
+        await rebuildCategoriesIndex({ limitPerCategory: 80 });
+    }
+    
     const runId = String(Date.now());
 
 
