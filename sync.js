@@ -183,47 +183,53 @@ async function rebuildCategoriesIndex({ limitPerCategory = 40 } = {}) {
 export async function runSync() {
     const lastDate = await getLastSyncDate();
 
-    // If no lastDate, do full sync; else incremental by updated_at date.
-    // Use yesterday if lastDate missing (some APIs prefer date filter only).
+    // One-time full sync switch (set FULL_SYNC=true in Render env vars)
+    const FULL_SYNC = String(process.env.FULL_SYNC || "").toLowerCase() === "true";
     const updatedAt = FULL_SYNC ? null : (lastDate || null);
 
     let page = 1;
     let totalFetched = 0;
     let lastSeenUpdatedAt = null;
+    let lastPage = null;
 
     while (true) {
         const data = await fetchGamesPage({ page, perPage: PER_PAGE, updatedAt });
 
-        // The docs structure may return { data: [...] } or direct array.
-        const rawGames = Array.isArray(data) ? data : data.data || data.games || [];
+        // SlotsLaunch returns { data: [...], meta: {...} }
+        const rawGames = Array.isArray(data) ? data : (data.data || data.games || []);
+        const meta = Array.isArray(data) ? null : (data.meta || null);
+
         if (!rawGames.length) break;
 
+        // Learn last_page from meta (first response is enough)
+        if (meta && typeof meta.last_page === "number") {
+            lastPage = meta.last_page;
+        }
+
         const normalized = rawGames.map(normalizeGame);
+        await upsertGames(normalized);
 
-        // optional but recommended: do not store unpublished at all
-        const publishedOnly = normalized.filter((g) => g.published === true);
+        totalFetched += normalized.length;
+        lastSeenUpdatedAt = normalized[normalized.length - 1]?.updatedAt || lastSeenUpdatedAt;
 
-        await upsertGames(publishedOnly);
-
-        totalFetched += publishedOnly.length;
-        lastSeenUpdatedAt =
-            publishedOnly[publishedOnly.length - 1]?.updatedAt || lastSeenUpdatedAt;
-
-        // stop if we fetched fewer than per page
-        if (rawGames.length < PER_PAGE) break;
+        // Stop condition based on meta, fallback to length-based
+        if (lastPage !== null) {
+            if (page >= lastPage) break;
+        } else {
+            if (rawGames.length < PER_PAGE) break;
+        }
 
         page += 1;
-        // safety limit
-        if (page > 200) break;
+
+        // extra safety limit (keep it, but make it generous)
+        if (page > 2000) break;
     }
 
-    // Rebuild category indices after sync
     await rebuildCategoriesIndex({ limitPerCategory: 40 });
 
-    // Update last sync date for next run.
-    // Use today date string so we always pull recent changes.
     const today = toDateStringYYYYMMDD(new Date());
     await setLastSyncDate(today);
 
-    return { totalFetched, updatedAtUsed: updatedAt, lastSeenUpdatedAt };
+    return { totalFetched, updatedAtUsed: updatedAt, lastSeenUpdatedAt, lastPage };
 }
+
