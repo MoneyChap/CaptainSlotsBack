@@ -139,10 +139,43 @@ app.get("/api/home", async (req, res) => {
             rtp97Games = bestGames.filter((g) => typeof g.rtp === "number" && g.rtp >= 97).slice(0, 50);
         }
 
+        // exclusive: christmas themed (simple keyword match)
+        const allSnap = await firestore
+            .collection("games")
+            .where("enabled", "==", true)
+            .limit(500)
+            .get();
+
+        const allDocs = allSnap.docs.map((d) => d.data());
+
+        const christmasKeywords = [
+            "christmas",
+            "xmas",
+            "santa",
+            "noel",
+            "holiday",
+            "winter",
+            "snow",
+            "new year",
+            "ny",
+            "jingle",
+        ];
+
+        const exclusiveFiltered = allDocs.filter((g) => {
+            const name = String(g.name || "").toLowerCase();
+            return christmasKeywords.some((k) => name.includes(k));
+        });
+
+        const exclusiveGames = exclusiveFiltered.slice(0, 50).map((g) => toClientGame(g));
+
+        // fallback if nothing matched
+        const exclusiveFinal = exclusiveGames.length ? exclusiveGames : bestGames.slice(0, 50);
+
+
         const result = [
             { id: "best", title: "Best games", icon: "⭐", games: bestGames },
             { id: "rtp97", title: "RTP 97%", icon: "🎯", games: rtp97Games },
-            { id: "exclusive", title: "Exclusive games", icon: "💎", games: [] },
+            { id: "exclusive", title: "Exclusive games", icon: "💎", games: exclusiveFinal },
             { id: "new", title: "New games", icon: "🆕", games: newGames },
         ];
 
