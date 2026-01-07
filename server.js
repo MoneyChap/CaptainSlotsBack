@@ -173,10 +173,10 @@ app.get("/api/home", async (req, res) => {
 
 
         const result = [
+            { id: "exclusive", title: "Exclusive games", icon: "🎁", games: exclusiveFinal },
             { id: "best", title: "Best games", icon: "⭐", games: bestGames },
-            { id: "rtp97", title: "RTP 97%", icon: "🎯", games: rtp97Games },
-            { id: "exclusive", title: "Exclusive games", icon: "💎", games: exclusiveFinal },
             { id: "new", title: "New games", icon: "🆕", games: newGames },
+            { id: "rtp97", title: "RTP 97%", icon: "🎯", games: rtp97Games },
         ];
 
         res.json(result);
