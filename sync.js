@@ -24,12 +24,15 @@ function normalizeGame(g) {
         "";
     const thumb = g.thumb || g.thumbnail || "";
     const rtp = typeof g.rtp === "number" ? g.rtp : g.rtp ? Number(g.rtp) : null;
+
     const updatedAt = g.updated_at || null;
     const createdAt = g.created_at || null;
 
+    const updatedAtTs = updatedAt ? Date.parse(String(updatedAt)) : 0;
+    const createdAtTs = createdAt ? Date.parse(String(createdAt)) : 0;
+
     const publishedRaw = g.published;
-    const published =
-        publishedRaw === true || publishedRaw === 1 || publishedRaw === "1";
+    const published = publishedRaw === true || publishedRaw === 1 || publishedRaw === "1";
 
     const apiUrl = g.url || "";
     const embedUrl = apiUrl ? buildEmbedUrl(apiUrl) : "";
@@ -42,12 +45,15 @@ function normalizeGame(g) {
         rtp,
         updatedAt,
         createdAt,
+        updatedAtTs: Number.isFinite(updatedAtTs) ? updatedAtTs : 0,
+        createdAtTs: Number.isFinite(createdAtTs) ? createdAtTs : 0,
         published,
         enabled: published,
         apiUrl,
         embedUrl,
     };
 }
+
 
 async function upsertGames(games) {
     const firestore = db();
@@ -114,7 +120,7 @@ function pickCategoryIdsForGame(game) {
     return ids;
 }
 
-async function rebuildCategoriesIndex({ limitPerCategory = 80 } = {}) {
+async function rebuildCategoriesIndex({ limitPerCategory = 80, runId } = {}) {
     if (!runId) throw new Error("rebuildCategoriesIndex: missing runId");
     const firestore = db();
 

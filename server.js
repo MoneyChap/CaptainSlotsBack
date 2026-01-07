@@ -4,7 +4,6 @@ import cors from "cors";
 import fetch from "node-fetch";
 import { db } from "./firebase.js";
 import { runSync } from "./sync.js";
-import { CATEGORY_DEFS } from "./categories.js";
 import { seedNewestPublishedGames } from "./sync.js";
 import { deleteCollection } from "./admin.js";
 
@@ -19,6 +18,9 @@ app.set("trust proxy", true);
 app.use(cors());
 app.use(express.json());
 
+/* -----------------------------
+   GEO cache (unchanged)
+------------------------------ */
 const GEO_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const geoCache = new Map(); // ip -> { ts, data }
 
@@ -28,35 +30,18 @@ function requireSecret(req) {
 }
 
 function getClientIp(req) {
-    // Prefer X-Forwarded-For (first IP)
     const xff = req.headers["x-forwarded-for"];
-    if (typeof xff === "string" && xff.trim()) {
-        return xff.split(",")[0].trim();
-    }
-    // Express also supports req.ip (works with trust proxy)
+    if (typeof xff === "string" && xff.trim()) return xff.split(",")[0].trim();
     if (req.ip) return req.ip;
-
-    // Fallback
     const ra = req.socket?.remoteAddress;
     return typeof ra === "string" ? ra : "";
 }
 
 function normalizeIp(ip) {
-    // Remove IPv6 prefix if present (e.g., ::ffff:1.2.3.4)
     if (!ip) return "";
     if (ip.startsWith("::ffff:")) return ip.replace("::ffff:", "");
     return ip;
 }
-
-app.get("/debug/firestore", async (req, res) => {
-    const firestore = db();
-    await firestore.collection("meta").doc("ping").set({ t: Date.now() }, { merge: true });
-    res.json({ ok: true });
-});
-
-app.get("/health", (req, res) => {
-    res.json({ ok: true });
-});
 
 function cacheGet(ip) {
     const v = geoCache.get(ip);
@@ -90,23 +75,64 @@ async function fetchJson(url, headers = {}) {
     return { ok: r.ok, status: r.status, json, text };
 }
 
-/**
- * GEO by IP (automatic, no permission prompt).
- * Returns country/city information based on request IP.
- */
+/* -----------------------------
+   Simple in-memory API caches
+------------------------------ */
+const HOME_CACHE_TTL_MS = 60 * 1000; // 60s
+let homeCache = null; // { ts, data }
+
+const GAME_CACHE_TTL_MS = 10 * 60 * 1000; // 10 min
+const gameCache = new Map(); // id -> { ts, data }
+
+function isQuotaError(e) {
+    const msg = String(e?.message || e || "");
+    return msg.includes("RESOURCE_EXHAUSTED") || msg.includes("Quota exceeded");
+}
+
+function toClientGame(g) {
+    return {
+        id: g.id,
+        name: g.name,
+        provider: g.provider,
+        thumb: g.thumb,
+        demoUrl: g.embedUrl,
+        rtp: g.rtp ?? null,
+    };
+}
+
+function safeTs(v) {
+    // supports ISO date, number, or null
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    const t = Date.parse(String(v || ""));
+    return Number.isFinite(t) ? t : 0;
+}
+
+/* -----------------------------
+   Debug / health
+------------------------------ */
+app.get("/debug/firestore", async (req, res) => {
+    const firestore = db();
+    await firestore.collection("meta").doc("ping").set({ t: Date.now() }, { merge: true });
+    res.json({ ok: true });
+});
+
+app.get("/health", (req, res) => {
+    res.json({ ok: true });
+});
+
+/* -----------------------------
+   GEO by IP (unchanged)
+------------------------------ */
 app.get("/api/geo", async (req, res) => {
     try {
         const ip = normalizeIp(getClientIp(req)) || "unknown";
 
-        // 1) Cache hit
         const cached = cacheGet(ip);
         if (cached) {
             res.json({ ok: true, cached: true, ...cached });
             return;
         }
 
-        // 2) Provider A: ipwho.is (usually lenient, no key)
-        // docs: returns { success, country, city, region, timezone, ip, ... }
         const a = await fetchJson(`https://ipwho.is/${encodeURIComponent(ip)}`);
 
         if (a.ok && a.json && a.json.success !== false) {
@@ -128,7 +154,6 @@ app.get("/api/geo", async (req, res) => {
             return;
         }
 
-        // 3) Fallback provider B: ipapi.co
         const b = await fetchJson(
             ip === "unknown" ? "https://ipapi.co/json/" : `https://ipapi.co/${encodeURIComponent(ip)}/json/`
         );
@@ -152,7 +177,6 @@ app.get("/api/geo", async (req, res) => {
             return;
         }
 
-        // If both failed, return meaningful error
         res.status(502).json({
             ok: false,
             error: "Geo providers failed",
@@ -164,61 +188,45 @@ app.get("/api/geo", async (req, res) => {
     }
 });
 
+/* -----------------------------
+   HOME: single Firestore read + cache + stale fallback
+------------------------------ */
 app.get("/api/home", async (req, res) => {
     try {
-        const firestore = db();
-
-        const toClientGame = (g) => ({
-            id: g.id,
-            name: g.name,
-            provider: g.provider,
-            thumb: g.thumb,
-            demoUrl: g.embedUrl,
-            rtp: g.rtp ?? null,
-        });
-
-        const bestSnap = await firestore
-            .collection("games")
-            .where("enabled", "==", true)
-            .orderBy("updatedAt", "desc")
-            .limit(50)
-            .get();
-
-        const bestGames = bestSnap.docs.map((d) => toClientGame(d.data()));
-
-        const newSnap = await firestore
-            .collection("games")
-            .where("enabled", "==", true)
-            .orderBy("createdAt", "desc")
-            .limit(50)
-            .get();
-
-        const newGames = newSnap.docs.map((d) => toClientGame(d.data()));
-
-        let rtp97Games = [];
-        try {
-            const rtpSnap = await firestore
-                .collection("games")
-                .where("enabled", "==", true)
-                .where("rtp", ">=", 97)
-                .orderBy("rtp", "desc")
-                .limit(50)
-                .get();
-
-            rtp97Games = rtpSnap.docs.map((d) => toClientGame(d.data()));
-        } catch (e) {
-            rtp97Games = bestGames
-                .filter((g) => typeof g.rtp === "number" && g.rtp >= 97)
-                .slice(0, 50);
+        // Fast path: serve cache
+        if (homeCache && Date.now() - homeCache.ts < HOME_CACHE_TTL_MS) {
+            res.json(homeCache.data);
+            return;
         }
 
-        const allSnap = await firestore
-            .collection("games")
-            .where("enabled", "==", true)
-            .limit(500)
-            .get();
+        const firestore = db();
 
-        const allDocs = allSnap.docs.map((d) => d.data());
+        // One query only
+        // Fetch enough to build all categories in memory.
+        // Ordering by updatedAtTs is best (if you add it in sync.js). If it does not exist, updatedAt string still works.
+        let snap;
+        try {
+            snap = await firestore
+                .collection("games")
+                .where("enabled", "==", true)
+                .orderBy("updatedAtTs", "desc")
+                .limit(220)
+                .get();
+        } catch {
+            // Fallback if updatedAtTs index/field is not present yet
+            snap = await firestore
+                .collection("games")
+                .where("enabled", "==", true)
+                .orderBy("updatedAt", "desc")
+                .limit(220)
+                .get();
+        }
+
+        const docs = snap.docs.map((d) => d.data());
+
+        // Build categories in memory (no extra Firestore reads)
+        const byUpdated = [...docs].sort((a, b) => safeTs(b.updatedAtTs ?? b.updatedAt) - safeTs(a.updatedAtTs ?? a.updatedAt));
+        const byCreated = [...docs].sort((a, b) => safeTs(b.createdAtTs ?? b.createdAt) - safeTs(a.createdAtTs ?? a.createdAt));
 
         const christmasKeywords = [
             "christmas",
@@ -233,52 +241,81 @@ app.get("/api/home", async (req, res) => {
             "jingle",
         ];
 
-        const exclusiveFiltered = allDocs.filter((g) => {
+        const exclusive = docs.filter((g) => {
             const name = String(g.name || "").toLowerCase();
             return christmasKeywords.some((k) => name.includes(k));
         });
 
-        const exclusiveGames = exclusiveFiltered.slice(0, 50).map((g) => toClientGame(g));
-        const exclusiveFinal = exclusiveGames.length ? exclusiveGames : bestGames.slice(0, 50);
+        const bestGames = byUpdated.slice(0, 50).map(toClientGame);
+        const newGames = byCreated.slice(0, 50).map(toClientGame);
+
+        const rtp97Games = docs
+            .filter((g) => typeof g.rtp === "number" && g.rtp >= 97)
+            .sort((a, b) => (b.rtp ?? 0) - (a.rtp ?? 0))
+            .slice(0, 50)
+            .map(toClientGame);
+
+        const exclusiveGames = (exclusive.length ? exclusive : byUpdated).slice(0, 50).map(toClientGame);
 
         const result = [
-            { id: "exclusive", title: "Exclusive games", icon: "🎁", games: exclusiveFinal },
+            { id: "exclusive", title: "Exclusive games", icon: "🎁", games: exclusiveGames },
             { id: "best", title: "Best games", icon: "⭐", games: bestGames },
             { id: "new", title: "New games", icon: "🆕", games: newGames },
             { id: "rtp97", title: "RTP 97%", icon: "🎯", games: rtp97Games },
         ];
 
+        homeCache = { ts: Date.now(), data: result };
         res.json(result);
     } catch (e) {
+        // If quota is hit, serve last cached response (even if stale) to keep app usable
+        if (isQuotaError(e) && homeCache?.data) {
+            res.json(homeCache.data);
+            return;
+        }
         res.status(500).json({ error: String(e.message || e) });
     }
 });
 
+/* -----------------------------
+   GAME: cache per id + stale fallback on quota
+------------------------------ */
 app.get("/api/games/:id", async (req, res) => {
+    const id = String(req.params.id);
+
+    // Cache hit
+    const cached = gameCache.get(id);
+    if (cached && Date.now() - cached.ts < GAME_CACHE_TTL_MS) {
+        res.json(cached.data);
+        return;
+    }
+
     try {
         const firestore = db();
-        const id = String(req.params.id);
-
         const snap = await firestore.collection("games").doc(id).get();
+
         if (!snap.exists) {
             res.status(404).json({ error: "Not found" });
             return;
         }
 
         const g = snap.data();
-        res.json({
-            id: g.id,
-            name: g.name,
-            provider: g.provider,
-            thumb: g.thumb,
-            demoUrl: g.embedUrl,
-            rtp: g.rtp ?? null,
-        });
+        const payload = toClientGame(g);
+
+        gameCache.set(id, { ts: Date.now(), data: payload });
+        res.json(payload);
     } catch (e) {
+        if (isQuotaError(e) && cached?.data) {
+            // Serve stale to prevent "Game not found" on temporary Firestore throttling
+            res.json(cached.data);
+            return;
+        }
         res.status(500).json({ error: String(e.message || e) });
     }
 });
 
+/* -----------------------------
+   SYNC (unchanged)
+------------------------------ */
 app.post("/api/sync", async (req, res) => {
     try {
         if (!requireSecret(req)) {
@@ -287,17 +324,19 @@ app.post("/api/sync", async (req, res) => {
         }
 
         const info = await runSync();
+
+        // After syncing, drop home cache so next /api/home rebuilds once
+        homeCache = null;
+
         res.json({ ok: true, info });
     } catch (e) {
         res.status(500).json({ error: String(e.message || e) });
     }
 });
 
-const port = Number(process.env.PORT || 3001);
-app.listen(port, () => {
-    console.log(`API listening on :${port}`);
-});
-
+/* -----------------------------
+   ADMIN reset (unchanged)
+------------------------------ */
 app.post("/api/admin/reset", async (req, res) => {
     try {
         if (!requireSecret(req)) {
@@ -311,8 +350,17 @@ app.post("/api/admin/reset", async (req, res) => {
 
         const info = await seedNewestPublishedGames({ target });
 
+        // After reset, drop caches
+        homeCache = null;
+        gameCache.clear();
+
         res.json({ ok: true, info });
     } catch (e) {
         res.status(500).json({ error: String(e.message || e) });
     }
+});
+
+const port = Number(process.env.PORT || 3001);
+app.listen(port, () => {
+    console.log(`API listening on :${port}`);
 });
