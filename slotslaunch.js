@@ -8,26 +8,30 @@ function requireEnv(name) {
 
 const BASE = "https://slotslaunch.com/api";
 
-export async function fetchGamesPage({ page, perPage, updatedAt }) {
+export async function fetchGamesPage({ page, perPage, updatedAt, ids } = {}) {
     const token = requireEnv("SLOTSLAUNCH_TOKEN");
     const host = requireEnv("SLOTSLAUNCH_HOST");
 
     const url = new URL(`${BASE}/games`);
     url.searchParams.set("token", token);
-    url.searchParams.set("page", String(page));
-    url.searchParams.set("per_page", String(perPage));
-    url.searchParams.set("published", 1);
-    url.searchParams.set("order_by", "updated_at");
-    url.searchParams.set("order", "desc");
 
-    if (updatedAt) {
-        // format: yyyy-mm-dd
-        url.searchParams.set("updated_at", updatedAt);
+    // If ids[] are provided, prefer id-based pull
+    if (Array.isArray(ids) && ids.length) {
+        for (const id of ids) url.searchParams.append("id[]", String(id));
+        // When using id[] filter, paging usually not needed, but harmless:
+        url.searchParams.set("per_page", String(perPage || 150));
+    } else {
+        url.searchParams.set("page", String(page || 1));
+        url.searchParams.set("per_page", String(perPage || 150));
+        url.searchParams.set("published", 1);
+        url.searchParams.set("order_by", "updated_at");
+        url.searchParams.set("order", "desc");
+
+        if (updatedAt) url.searchParams.set("updated_at", updatedAt);
     }
 
     const res = await fetch(url.toString(), {
         headers: {
-            // SlotsLaunch expects host/origin header to match your site host
             origin: host.startsWith("http") ? host : `https://${host}`,
         },
     });
@@ -39,6 +43,7 @@ export async function fetchGamesPage({ page, perPage, updatedAt }) {
 
     return res.json();
 }
+
 
 // Build iframe URL the frontend can use directly.
 // If SlotsLaunch already returns url as /iframe/{id}, we still append token safely.

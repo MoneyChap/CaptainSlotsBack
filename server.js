@@ -530,7 +530,82 @@ app.post("/api/admin/reset", async (req, res) => {
     }
 });
 
+app.post("/api/admin/refresh-providers", async (req, res) => {
+    try {
+        if (!requireSecret(req)) {
+            res.status(401).json({ error: "Unauthorized" });
+            return;
+        }
+
+        const firestore = db();
+
+        // How many games to process
+        const limit = Number(req.body?.limit ?? 5000);
+
+        // Batch size for SlotsLaunch id[] calls
+        const batchSize = Number(req.body?.batchSize ?? 120); // keep under URL limits
+        const perPage = 150;
+
+        const snap = await firestore.collection("games").limit(limit).get();
+        const ids = snap.docs.map((d) => String(d.id));
+
+        let updated = 0;
+        let batches = 0;
+
+        for (let i = 0; i < ids.length; i += batchSize) {
+            const chunk = ids.slice(i, i + batchSize);
+
+            const data = await fetchGamesPage({ ids: chunk, perPage });
+
+            const rawGames = Array.isArray(data) ? data : (data.data || data.games || []);
+            if (!rawGames.length) continue;
+
+            const normalized = rawGames.map(normalizeGame);
+
+            // Only update provider field (and syncedAt), do not mess with enabled/published if you do not want to.
+            const partial = normalized.map((g) => ({
+                id: String(g.id),
+                provider: g.provider || "",
+                updatedAt: g.updatedAt || null,
+                updatedAtTs: g.updatedAtTs || 0,
+                syncedAt: new Date().toISOString(),
+            }));
+
+            // Use your existing upsertGames, or write direct merges.
+            // Here we do direct merges so we only overwrite provider-related fields.
+            const fs = db();
+            const chunkSize = 250;
+
+            for (let j = 0; j < partial.length; j += chunkSize) {
+                const batch = fs.batch();
+                const part = partial.slice(j, j + chunkSize);
+
+                for (const g of part) {
+                    const ref = fs.collection("games").doc(String(g.id));
+                    batch.set(ref, g, { merge: true });
+                }
+
+                await batch.commit();
+            }
+
+            updated += partial.length;
+            batches += 1;
+        }
+
+        // Clear caches so home reflects updated providers immediately
+        homeCache = null;
+        gameCache.clear();
+
+        res.json({ ok: true, totalInDb: ids.length, updated, batches });
+    } catch (e) {
+        res.status(500).json({ error: String(e.message || e) });
+    }
+});
+
+
 const port = Number(process.env.PORT || 3001);
 app.listen(port, () => {
     console.log(`API listening on :${port}`);
 });
+
+
