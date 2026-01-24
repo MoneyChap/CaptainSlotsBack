@@ -44,11 +44,26 @@ async function getAllUsers() {
 }
 
 function logFullError(prefix, err) {
-    console.error(prefix, err?.message || err);
-    if (err?.stack) console.error(err.stack);
-    console.error("full error:", util.inspect(err, { depth: 8 }));
-    const body = err?.response?.body || err?.response?.data;
-    if (body) console.error("telegram response body:", util.inspect(body, { depth: 8 }));
+    console.error(prefix);
+    console.error("message:", err?.message);
+    console.error("code:", err?.code);
+    console.error("name:", err?.name);
+
+    // Telegram API details usually live here
+    const body =
+        err?.response?.body ||
+        err?.response?.data ||
+        err?.body ||
+        err?.response;
+
+    if (body) {
+        console.error("telegram body:", typeof body === "string" ? body : util.inspect(body, { depth: 10 }));
+    }
+
+    if (err?.stack) console.error("stack:", err.stack);
+
+    // If everything above is missing, print a trimmed inspect
+    console.error("inspect:", util.inspect(err, { depth: 4 }));
 }
 
 /**
@@ -109,10 +124,15 @@ export function initTelegramBot(app) {
                 inline_keyboard: [[{ text: "Open app", web_app: { url: webAppUrl } }]],
             };
 
-            if (imageUrl) {
-                await bot.sendPhoto(chatId, imageUrl, { caption, reply_markup });
-            } else {
-                await bot.sendMessage(chatId, caption, { reply_markup });
+            try {
+                if (imageUrl) {
+                    await bot.sendPhoto(chatId, imageUrl, { caption, reply_markup });
+                } else {
+                    await bot.sendMessage(chatId, caption, { reply_markup });
+                }
+            } catch (err) {
+                logFullError("failed to reply to /start:", err);
+                throw err;
             }
         } catch (err) {
             logFullError("start handler failed:", err);
