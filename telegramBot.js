@@ -42,12 +42,15 @@ export function initTelegramBot(app) {
 
     // Webhook endpoint Telegram will POST updates to
     app.post(`/telegram/webhook/${webhookSecret}`, (req, res) => {
+        console.log("Telegram update received");
         bot.processUpdate(req.body);
         res.sendStatus(200);
     });
 
     // Register webhook with Telegram
-    bot.setWebHook(`${publicUrl}/telegram/webhook/${webhookSecret}`);
+    bot.setWebHook(`${publicUrl}/telegram/webhook/${webhookSecret}`)
+        .then(() => console.log("Telegram webhook set"))
+        .catch((e) => console.error("Failed to set Telegram webhook:", e));
 
     // Temporary in-memory store (resets on deploy/restart)
     const broadcastData = {};
