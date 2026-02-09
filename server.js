@@ -307,13 +307,14 @@ app.get("/api/home", async (req, res) => {
                 const newGames = byCreated.slice(0, 50).map(toClientGame);
 
                 const rtp97Games = docs
-                    .filter((g) => typeof g.rtp === "number" && g.rtp >= 97)
+                    .filter((g) => Number.isFinite(g.rtp) && g.rtp >= 97)
                     .sort((a, b) => (b.rtp ?? 0) - (a.rtp ?? 0))
                     .slice(0, 50)
                     .map(toClientGame);
 
-                const exclusiveGames = (exclusive.length ? exclusive : byUpdated)
-                    .slice(0, 50)
+
+                const exclusiveGames = exclusive
+                    .slice(0, 5)
                     .map(toClientGame);
 
                 return [

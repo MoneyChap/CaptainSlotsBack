@@ -42,7 +42,16 @@ export function normalizeGame(g) {
     const name = g.name || g.title || "";
     const provider = resolveProvider(g);
     const thumb = g.thumb || g.thumbnail || "";
-    const rtp = typeof g.rtp === "number" ? g.rtp : g.rtp ? Number(g.rtp) : null;
+    const rawRtp = g.rtp;
+    let rtp = null;
+
+    if (typeof rawRtp === "number" && Number.isFinite(rawRtp)) {
+        rtp = rawRtp;
+    } else if (typeof rawRtp === "string") {
+        const cleaned = rawRtp.replace("%", "").replace(",", ".").trim();
+        const n = Number(cleaned);
+        if (Number.isFinite(n)) rtp = n;
+    }
 
     const updatedAt = g.updated_at || null;
     const createdAt = g.created_at || null;
