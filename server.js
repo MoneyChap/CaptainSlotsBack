@@ -283,7 +283,7 @@ app.get("/api/home", async (req, res) => {
                     (a, b) => safeTs(b.createdAtTs ?? b.createdAt) - safeTs(a.createdAtTs ?? a.createdAt)
                 );
 
-                const valentineRegex = /\b(valentine'?s?|romance|romantic|cupid|heart|hearts|kiss|lover|lovers)\b/i;
+                const valentineRegex = /\b(valentine'?s?|romance|romantic|cupid|heart|hearts|kiss|lover|lovers|love|lovely|amour)\b/i;
                 const excludedRegex = /\b(leprechaun|clover|st\.?\s*patrick|shamrock|irish)\b/i;
 
                 const exclusive = docs.filter((g) => {
@@ -608,4 +608,3 @@ const port = Number(process.env.PORT || 3001);
 app.listen(port, () => {
     console.log(`API listening on :${port}`);
 });
-
