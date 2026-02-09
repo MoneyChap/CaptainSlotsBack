@@ -70,14 +70,92 @@ function makeId() {
     return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
+const SCHEDULE_TIME_ZONE = "Europe/Riga";
+const tzPartsFormatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: SCHEDULE_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+});
+
+function getTimeZoneParts(ts) {
+    const map = {};
+    for (const p of tzPartsFormatter.formatToParts(new Date(ts))) {
+        if (p.type !== "literal") map[p.type] = p.value;
+    }
+    return {
+        year: Number(map.year),
+        month: Number(map.month),
+        day: Number(map.day),
+        hour: Number(map.hour),
+        minute: Number(map.minute),
+        second: Number(map.second),
+    };
+}
+
+function getTimeZoneOffsetMs(ts) {
+    const p = getTimeZoneParts(ts);
+    const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second, 0);
+    return asUtc - ts;
+}
+
+function wallTimeToUtcMs(year, month, day, hour, minute) {
+    const baseUtc = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+    let ts = baseUtc;
+
+    // Iterate to stabilize offset around DST boundaries.
+    for (let i = 0; i < 3; i += 1) {
+        const offset = getTimeZoneOffsetMs(ts);
+        const nextTs = baseUtc - offset;
+        if (nextTs === ts) break;
+        ts = nextTs;
+    }
+
+    // Reject impossible wall-times (for DST jumps).
+    const check = getTimeZoneParts(ts);
+    if (
+        check.year !== year ||
+        check.month !== month ||
+        check.day !== day ||
+        check.hour !== hour ||
+        check.minute !== minute
+    ) {
+        return null;
+    }
+
+    return ts;
+}
+
 function parseDateTimeLocal(input) {
     // expected: YYYY-MM-DD HH:mm
     const m = String(input || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/);
     if (!m) return null;
-    const [, y, mo, d, h, mi] = m.map(Number);
-    const dt = new Date(y, mo - 1, d, h, mi, 0, 0);
-    if (!Number.isFinite(dt.getTime())) return null;
-    return dt;
+    const [, y, mo, d, h, mi] = m;
+
+    const year = Number(y);
+    const month = Number(mo);
+    const day = Number(d);
+    const hour = Number(h);
+    const minute = Number(mi);
+    if (
+        !Number.isInteger(year) ||
+        month < 1 ||
+        month > 12 ||
+        day < 1 ||
+        day > 31 ||
+        hour < 0 ||
+        hour > 23 ||
+        minute < 0 ||
+        minute > 59
+    ) return null;
+
+    const ts = wallTimeToUtcMs(year, month, day, hour, minute);
+    if (!Number.isFinite(ts)) return null;
+    return new Date(ts);
 }
 
 function parseHHMM(input) {
@@ -90,16 +168,42 @@ function parseHHMM(input) {
 }
 
 function nextDailyRunAt(hh, mm, from = new Date()) {
-    const t = new Date(from);
-    t.setSeconds(0, 0);
-    t.setHours(hh, mm, 0, 0);
-    if (t.getTime() <= from.getTime()) t.setDate(t.getDate() + 1);
-    return t.getTime();
+    const nowMs = from.getTime();
+    const nowParts = getTimeZoneParts(nowMs);
+    const dayStartUtc = Date.UTC(nowParts.year, nowParts.month - 1, nowParts.day, 0, 0, 0, 0);
+
+    for (let i = 0; i < 14; i += 1) {
+        const d = new Date(dayStartUtc + i * 24 * 60 * 60 * 1000);
+        const ts = wallTimeToUtcMs(
+            d.getUTCFullYear(),
+            d.getUTCMonth() + 1,
+            d.getUTCDate(),
+            hh,
+            mm
+        );
+        if (!Number.isFinite(ts)) continue;
+        if (ts > nowMs) return ts;
+    }
+
+    return nowMs + 24 * 60 * 60 * 1000;
 }
 
 function fmtTs(ts) {
-    const d = new Date(ts);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    const p = getTimeZoneParts(ts);
+    return `${String(p.year).padStart(4, "0")}-${String(p.month).padStart(2, "0")}-${String(p.day).padStart(2, "0")} ${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")} (Riga)`;
+}
+
+function payloadPreviewText(payload, maxLen = 80) {
+    const raw = payload?.text || payload?.caption || "";
+    const oneLine = String(raw).replace(/\s+/g, " ").trim();
+    if (oneLine) return oneLine.length > maxLen ? `${oneLine.slice(0, maxLen - 1)}…` : oneLine;
+
+    if (payload?.photoFileId) return "Photo";
+    if (payload?.videoFileId) return "Video";
+    if (payload?.videoNoteFileId) return "Video note";
+    if (payload?.documentFileId) return "Document";
+    if (payload?.audioFileId) return "Audio";
+    return "Message";
 }
 
 /**
@@ -272,17 +376,34 @@ export function initTelegramBot(app) {
             return;
         }
 
-        const rows = list.map((s) => [
-            {
-                text: `${s.mode === "once" ? "🕒" : "🔁"} ${fmtTs(s.nextRunAt)} • ${s.id}`,
-                callback_data: `sched_open:${s.id}`,
+        await bot.sendMessage(chatId, "Scheduled broadcasts:");
+
+        for (const s of list) {
+            // Show actual content preview first, then actions.
+            try {
+                await sendPayloadToUser(chatId, s.payload);
+            } catch {
+                await bot.sendMessage(chatId, payloadPreviewText(s.payload));
+            }
+
+            await bot.sendMessage(
+                chatId,
+                `${s.mode === "once" ? "One-time" : "Daily"} • ${fmtTs(s.nextRunAt)}\n${payloadPreviewText(s.payload)}`,
+                {
+                    reply_markup: {
+                        inline_keyboard: [
+                            [{ text: "Open", callback_data: `sched_open:${s.id}` }],
+                            [{ text: "Cancel", callback_data: `sched_cancel:${s.id}` }],
+                        ],
+                    },
+                }
+            );
+        }
+
+        await bot.sendMessage(chatId, "End of scheduled broadcasts.", {
+            reply_markup: {
+                inline_keyboard: [[{ text: "Refresh", callback_data: "sched_list" }]],
             },
-        ]);
-
-        rows.push([{ text: "Refresh", callback_data: "sched_list" }]);
-
-        await bot.sendMessage(chatId, "Scheduled broadcasts:", {
-            reply_markup: { inline_keyboard: rows },
         });
     }
 
@@ -293,9 +414,15 @@ export function initTelegramBot(app) {
             return;
         }
 
+        try {
+            await sendPayloadToUser(chatId, s.payload);
+        } catch {
+            await bot.sendMessage(chatId, payloadPreviewText(s.payload));
+        }
+
         await bot.sendMessage(
             chatId,
-            `Schedule ${s.id}\nType: ${s.mode}\nWhen: ${scheduleSummary(s)}`,
+            `Type: ${s.mode}\nWhen: ${scheduleSummary(s)}\nPreview: ${payloadPreviewText(s.payload)}`,
             {
                 reply_markup: {
                     inline_keyboard: [
@@ -462,7 +589,7 @@ export function initTelegramBot(app) {
         if (state.step === "waiting_for_schedule_once_at") {
             const dt = parseDateTimeLocal(msg.text || "");
             if (!dt || dt.getTime() <= Date.now()) {
-                await bot.sendMessage(chatId, "Invalid datetime. Use: YYYY-MM-DD HH:mm (future time).");
+                await bot.sendMessage(chatId, "Invalid datetime. Use: YYYY-MM-DD HH:mm in Riga time (future time).");
                 return;
             }
 
@@ -487,7 +614,7 @@ export function initTelegramBot(app) {
         if (state.step === "waiting_for_schedule_daily_at") {
             const t = parseHHMM(msg.text || "");
             if (!t) {
-                await bot.sendMessage(chatId, "Invalid time. Use HH:mm (24h), e.g. 09:30");
+                await bot.sendMessage(chatId, "Invalid time. Use HH:mm (24h) in Riga time, e.g. 09:30");
                 return;
             }
 
@@ -520,14 +647,14 @@ export function initTelegramBot(app) {
             if (s.mode === "once") {
                 const dt = parseDateTimeLocal(msg.text || "");
                 if (!dt || dt.getTime() <= Date.now()) {
-                    await bot.sendMessage(chatId, "Invalid datetime. Use: YYYY-MM-DD HH:mm (future time).");
+                    await bot.sendMessage(chatId, "Invalid datetime. Use: YYYY-MM-DD HH:mm in Riga time (future time).");
                     return;
                 }
                 s.nextRunAt = dt.getTime();
             } else {
                 const t = parseHHMM(msg.text || "");
                 if (!t) {
-                    await bot.sendMessage(chatId, "Invalid time. Use HH:mm (24h), e.g. 09:30");
+                    await bot.sendMessage(chatId, "Invalid time. Use HH:mm (24h) in Riga time, e.g. 09:30");
                     return;
                 }
                 s.dailyTime = t.label;
@@ -598,14 +725,14 @@ export function initTelegramBot(app) {
         if (data === "bc_schedule_once") {
             if (!state || state.step !== "choosing_delivery") return;
             broadcastState.set(chatId, { step: "waiting_for_schedule_once_at", payload: state.payload });
-            await bot.sendMessage(chatId, "Send datetime in format: YYYY-MM-DD HH:mm");
+            await bot.sendMessage(chatId, "Send datetime in format: YYYY-MM-DD HH:mm (Riga time)");
             return;
         }
 
         if (data === "bc_schedule_daily") {
             if (!state || state.step !== "choosing_delivery") return;
             broadcastState.set(chatId, { step: "waiting_for_schedule_daily_at", payload: state.payload });
-            await bot.sendMessage(chatId, "Send daily time in format: HH:mm (24h)");
+            await bot.sendMessage(chatId, "Send daily time in format: HH:mm (24h, Riga time)");
             return;
         }
 
@@ -642,9 +769,9 @@ export function initTelegramBot(app) {
 
             broadcastState.set(chatId, { step: "waiting_for_edit_time", scheduleId });
             if (s.mode === "once") {
-                await bot.sendMessage(chatId, "Send new datetime: YYYY-MM-DD HH:mm");
+                await bot.sendMessage(chatId, "Send new datetime: YYYY-MM-DD HH:mm (Riga time)");
             } else {
-                await bot.sendMessage(chatId, "Send new daily time: HH:mm");
+                await bot.sendMessage(chatId, "Send new daily time: HH:mm (Riga time)");
             }
             return;
         }
