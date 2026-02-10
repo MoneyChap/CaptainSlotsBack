@@ -322,7 +322,7 @@ app.get("/api/home", async (req, res) => {
                 const newGames = byCreated.slice(0, 50).map(toClientGame);
 
                 const rtp97Games = rtpPool
-                    .filter((g) => Number.isFinite(g.rtp) && g.rtp >= 97)
+                    .filter((g) => Number.isFinite(g.rtp) && g.rtp >= 96)
                     .sort((a, b) => (b.rtp ?? 0) - (a.rtp ?? 0))
                     .slice(0, 50)
                     .map(toClientGame);
@@ -334,7 +334,7 @@ app.get("/api/home", async (req, res) => {
                     { id: "exclusive", title: "Exclusive games", icon: "🎁", games: exclusiveGames },
                     { id: "best", title: "Best games", icon: "⭐", games: bestMerged },
                     { id: "new", title: "New games", icon: "🆕", games: newGames },
-                    { id: "rtp97", title: "RTP 97%", icon: "🎯", games: rtp97Games },
+                    { id: "rtp97", title: "RTP 96%", icon: "🎯", games: rtp97Games },
                 ];
             })()
                 .then((data) => {
