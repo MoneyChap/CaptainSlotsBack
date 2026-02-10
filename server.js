@@ -311,9 +311,12 @@ app.get("/api/home", async (req, res) => {
                 const pinnedIds = await getPinnedBestIds();
                 let pinnedDocs = [];
                 if (pinnedIds.length) {
-                    const pinnedSet = new Set(pinnedIds.map(String));
-                    pinnedDocs = docs
-                        .filter((g) => pinnedSet.has(String(g.id)))
+                    const refs = pinnedIds.map((id) => firestore.collection("games").doc(String(id)));
+                    const snaps = await firestore.getAll(...refs);
+                    pinnedDocs = snaps
+                        .filter((s) => s.exists)
+                        .map((s) => s.data())
+                        .filter((g) => g?.enabled === true)
                         .sort((a, b) => pinnedIds.indexOf(String(a.id)) - pinnedIds.indexOf(String(b.id)));
                 }
 
@@ -459,17 +462,20 @@ app.post("/api/admin/best-games/pull", async (req, res) => {
                 const apiName = g?.name || g?.title || "";
                 const apiKey = keyName(apiName);
 
-                // FUZZY MATCH:
-                // - exact key match OR
-                // - api title contains requested title OR
-                // - requested title contains api title (rare but safe)
+                // Safer fuzzy match to avoid false positives like "Wanted ..." -> "Ted".
                 for (const w of wanted) {
                     if (foundByKey.has(w.key)) continue;
 
+                    const apiTokens = apiKey.split(" ").filter(Boolean);
+                    const wantTokens = w.key.split(" ").filter(Boolean);
+                    const overlap = wantTokens.filter((t) => apiTokens.includes(t)).length;
+                    const tokenRatio = wantTokens.length ? overlap / wantTokens.length : 0;
+
                     const ok =
                         apiKey === w.key ||
-                        apiKey.includes(w.key) ||
-                        w.key.includes(apiKey);
+                        (w.key.length >= 8 && apiKey.includes(w.key)) ||
+                        (apiKey.length >= 8 && w.key.includes(apiKey)) ||
+                        (overlap >= 2 && tokenRatio >= 0.6);
 
                     if (ok) {
                         const normalized = normalizeGame(g); // uses same shape as your sync 
@@ -520,6 +526,43 @@ app.post("/api/admin/best-games/pull", async (req, res) => {
         res.status(500).json({ error: String(e.message || e) });
     }
 });
+
+
+app.post("/api/admin/best-games/pin", async (req, res) => {
+    try {
+        if (!requireSecret(req)) {
+            res.status(401).json({ error: "Unauthorized" });
+            return;
+        }
+
+        const ids = Array.isArray(req.body?.ids)
+            ? req.body.ids.map((x) => String(x).trim()).filter(Boolean)
+            : [];
+
+        if (!ids.length) {
+            res.status(400).json({ error: "ids[] is required" });
+            return;
+        }
+
+        const firestore = db();
+        const refs = ids.map((id) => firestore.collection("games").doc(String(id)));
+        const snaps = await firestore.getAll(...refs);
+
+        const existing = snaps
+            .filter((s) => s.exists)
+            .map((s) => s.id);
+
+        await setPinnedBestIds(existing);
+
+        homeCache = null;
+        gameCache.clear();
+
+        res.json({ ok: true, pinned: existing, missing: ids.filter((id) => !existing.includes(id)) });
+    } catch (e) {
+        res.status(500).json({ error: String(e.message || e) });
+    }
+});
+
 
 
 /* -----------------------------
