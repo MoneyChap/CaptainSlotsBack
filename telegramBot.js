@@ -206,6 +206,18 @@ function payloadPreviewText(payload, maxLen = 80) {
     return "Message";
 }
 
+function normalizeHttpUrl(input) {
+    const raw = String(input || "").trim();
+    if (!raw) return null;
+    try {
+        const u = new URL(raw);
+        if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+        return u.toString();
+    } catch {
+        return null;
+    }
+}
+
 /**
  * Call this from server.js:
  *   import { initTelegramBot } from "./telegramBot.js";
@@ -275,13 +287,27 @@ export function initTelegramBot(app) {
             videoNoteFileId: msg.video_note?.file_id || null,
             documentFileId: msg.document?.file_id || null,
             audioFileId: msg.audio?.file_id || null,
+            ctaButton: null, // optional: { text, url }
+        };
+    }
+
+    function buildReplyMarkupForPayload(payload) {
+        const text = String(payload?.ctaButton?.text || "").trim();
+        const url = String(payload?.ctaButton?.url || "").trim();
+        if (!text || !url) return undefined;
+        return {
+            inline_keyboard: [[{ text, url }]],
         };
     }
 
     async function sendPayloadToUser(targetChatId, payload) {
+        const reply_markup = buildReplyMarkupForPayload(payload);
+
         if (payload.sourceChatId && payload.sourceMessageId) {
             try {
-                await bot.copyMessage(targetChatId, payload.sourceChatId, payload.sourceMessageId);
+                await bot.copyMessage(targetChatId, payload.sourceChatId, payload.sourceMessageId, {
+                    reply_markup,
+                });
                 return;
             } catch (err) {
                 // fallback below
@@ -292,6 +318,7 @@ export function initTelegramBot(app) {
         if (payload.text) {
             await bot.sendMessage(targetChatId, payload.text, {
                 entities: payload.textEntities || undefined,
+                reply_markup,
             });
             return;
         }
@@ -304,6 +331,7 @@ export function initTelegramBot(app) {
             await bot.sendPhoto(targetChatId, payload.photoFileId, {
                 caption: payload.caption || "",
                 caption_entities: captionEntities,
+                reply_markup,
             });
             return;
         }
@@ -312,6 +340,7 @@ export function initTelegramBot(app) {
             await bot.sendVideo(targetChatId, payload.videoFileId, {
                 caption: payload.caption || "",
                 caption_entities: captionEntities,
+                reply_markup,
             });
             return;
         }
@@ -325,6 +354,7 @@ export function initTelegramBot(app) {
             await bot.sendDocument(targetChatId, payload.documentFileId, {
                 caption: payload.caption || "",
                 caption_entities: captionEntities,
+                reply_markup,
             });
             return;
         }
@@ -333,6 +363,7 @@ export function initTelegramBot(app) {
             await bot.sendAudio(targetChatId, payload.audioFileId, {
                 caption: payload.caption || "",
                 caption_entities: captionEntities,
+                reply_markup,
             });
             return;
         }
@@ -495,6 +526,16 @@ export function initTelegramBot(app) {
         };
     }
 
+    function addUrlButtonKeyboard() {
+        return {
+            inline_keyboard: [
+                [{ text: "Yes, add URL button", callback_data: "bc_add_url_yes" }],
+                [{ text: "No URL button", callback_data: "bc_add_url_no" }],
+                [{ text: "Cancel draft", callback_data: "bc_cancel_draft" }],
+            ],
+        };
+    }
+
     // /start
     bot.onText(/^\/start(?:\s|$)/, async (msg) => {
         const chatId = msg.chat.id;
@@ -571,18 +612,60 @@ export function initTelegramBot(app) {
                 return;
             }
 
-            broadcastState.set(chatId, { step: "choosing_delivery", payload });
+            broadcastState.set(chatId, { step: "choosing_button_option", payload });
 
             try {
                 await sendPayloadToUser(chatId, payload); // preview
-                await bot.sendMessage(chatId, "Choose delivery mode:", {
-                    reply_markup: sendModeKeyboard(),
+                await bot.sendMessage(chatId, "Do you want to add a URL button under this message?", {
+                    reply_markup: addUrlButtonKeyboard(),
                 });
             } catch (err) {
                 logFullError("broadcast preview failed:", err);
                 broadcastState.delete(chatId);
                 await bot.sendMessage(chatId, "Preview failed. Please send /broadcast and try again.");
             }
+            return;
+        }
+
+        if (state.step === "waiting_for_button_text") {
+            const buttonText = String(msg.text || "").trim();
+            if (!buttonText) {
+                await bot.sendMessage(chatId, "Button text cannot be empty. Send button text.");
+                return;
+            }
+            if (buttonText.length > 64) {
+                await bot.sendMessage(chatId, "Button text is too long. Keep it under 64 characters.");
+                return;
+            }
+
+            broadcastState.set(chatId, {
+                step: "waiting_for_button_url",
+                payload: state.payload,
+                buttonText,
+            });
+            await bot.sendMessage(chatId, "Send button URL (must start with https:// or http://).");
+            return;
+        }
+
+        if (state.step === "waiting_for_button_url") {
+            const normalizedUrl = normalizeHttpUrl(msg.text || "");
+            if (!normalizedUrl) {
+                await bot.sendMessage(chatId, "Invalid URL. Send a valid https:// or http:// URL.");
+                return;
+            }
+
+            const payload = {
+                ...state.payload,
+                ctaButton: { text: state.buttonText, url: normalizedUrl },
+            };
+
+            broadcastState.set(chatId, { step: "choosing_delivery", payload });
+
+            await bot.sendMessage(
+                chatId,
+                `URL button added: "${payload.ctaButton.text}" -> ${payload.ctaButton.url}\nChoose delivery mode:`,
+                { reply_markup: sendModeKeyboard() }
+            );
             return;
         }
 
@@ -719,6 +802,22 @@ export function initTelegramBot(app) {
             } catch (err) {
                 await bot.sendMessage(chatId, `Broadcast failed: ${String(err.message || err)}`);
             }
+            return;
+        }
+
+        if (data === "bc_add_url_yes") {
+            if (!state || state.step !== "choosing_button_option") return;
+            broadcastState.set(chatId, { step: "waiting_for_button_text", payload: state.payload });
+            await bot.sendMessage(chatId, "Send button text (for example: Play Now).");
+            return;
+        }
+
+        if (data === "bc_add_url_no") {
+            if (!state || state.step !== "choosing_button_option") return;
+            broadcastState.set(chatId, { step: "choosing_delivery", payload: state.payload });
+            await bot.sendMessage(chatId, "Choose delivery mode:", {
+                reply_markup: sendModeKeyboard(),
+            });
             return;
         }
 
